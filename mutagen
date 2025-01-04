@@ -1,99 +1,38 @@
 #!/usr/bin/env bash
 
-## Create and manage a Docksal project with Mutagen (for help: fin mutagen)
+## Manage a Docksal project with Mutagen (use: fin mutagen)
 
 VERSION=0.2.2
 
-if [ "$TERM" != "dumb" ]; then
-	red='\033[0;91m'
-	green='\033[0;32m'
-	yellow='\033[0;33m'
+# ANSI color codes
+if [[ "$TERM" != "dumb" ]]; then
+  red='\033[0;91m'
+  green='\033[0;32m'
+  yellow='\033[0;33m'
   NC='\033[0m'
 fi
 
-mutagen > /dev/null 2>&1 || { echo -e "${red}Error${NC}${yellow}: Mutagen not installed${NC}"; exit 1; }
-fin docker ps > /dev/null 2>&1 || { echo -e "${red}Error${NC}${yellow}: Docker not running${NC}"; exit 1; }
+# Ensure required dependencies are available
+command -v mutagen > /dev/null || { echo -e "${red}Error${NC}: Mutagen not installed"; exit 1; }
+fin docker ps > /dev/null || { echo -e "${red}Error${NC}: Docker not running"; exit 1; }
 
-start() {
-  if fin config env > /dev/null 2>&1 ; then
-    if [[ -z $(get_fin_variable "MUTAGEN") ]]; then
-      new_project=false
-
-      echo -e "${red}WARNING${NC}${yellow}: A Docksal project already exists.${NC}"
-      read -rp "You can start Mutagen project after project containers reset
-which may produce data loss (ie. database tables).
-Do you want to proceed: [y/n] " proceed
-
-      if [ "$proceed" == y ] || [ "$proceed" == Y ] ; then
-        init $new_project
-      else
-        echo 'Aborting'
-        return
-      fi
-    fi
-  else
-    init true
-  fi
-
-  project_root=$(get_fin_variable "PROJECT_ROOT")
-  cd "${project_root//\"/}" || { echo "Cannot start"; exit 1; }
-
-  if [ -z $new_project ]; then
-    fin "$1"
-  fi
-
-  mutagen project start
+# Helper functions
+get_fin_variable() {
+  fin config get --env=local "$1" 2> /dev/null || fin config get "$1" 2> /dev/null
 }
 
-stop() {
-  project_root=$(get_fin_variable "PROJECT_ROOT")
-
-  cd "${project_root//\"/}" || { echo "Cannot stop"; exit 1; }
-
-  mutagen project terminate
-
-  if [ -z "$1" ]; then
-    fin rm cli
-  fi
-
-  fin stop
-}
-
-restart() {
-    stop "$1"
-    start start
-}
-
-init() {
-  if [ "$1" == true ]; then
-    fin config generate
-  fi
-
-  set_fin_variable "MUTAGEN" 1
-  set_fin_variable "PROJECT_ROOT" "$(fin config | grep PROJECT_ROOT | sed 's/PROJECT_ROOT: //')"
-  set_fin_variable "PROJECT_NAME" "$(fin config | grep COMPOSE_PROJECT_NAME_SAFE | sed 's/COMPOSE_PROJECT_NAME_SAFE: //')"
-  set_fin_variable "DOCKSAL_VOLUMES" "none"
-  create_mutagen_config
-
-  if [ "$1" == false ]; then
-    fin rm
-    fin up
-  fi
+set_fin_variable() {
+  fin config set --env=local "$1=$2"
 }
 
 create_mutagen_config() {
-  project_root=$(get_fin_variable "PROJECT_ROOT")
-  project_root="${project_root//\"/}"
+  local project_root=$(get_fin_variable "PROJECT_ROOT" | tr -d '"')
+  local project_name=$(get_fin_variable "PROJECT_NAME" | tr -d '"')
 
-  if [ ! -f "$project_root/mutagen.yml" ]; then
-    project_name=$(get_fin_variable "PROJECT_NAME")
-    project_name="${project_name//\"/}"
+  [[ -f "$project_root/mutagen.yml" ]] && return
 
-    cd "$project_root" ||  { echo "Cannot create a mutagen.yml configuration in $project_root"; exit 1; }
-
-    beta="docker://docker@$project_name""_cli_1/var/www"
-
-    echo "sync:
+  cat > "$project_root/mutagen.yml" <<EOF
+sync:
   defaults:
     flushOnCreate: true
     ignore:
@@ -103,103 +42,95 @@ create_mutagen_config() {
       defaultDirectoryMode: 755
   ${project_name}-cli:
     alpha: './'
-    beta: '$beta'
-    mode: 'two-way-resolved'" > mutagen.yml
-
-    echo 'mutagen.yml configuration created' in "$project_root"
-  fi
+    beta: 'docker://docker@$project_name""_cli_1/var/www'
+    mode: 'two-way-resolved'
+EOF
+  echo "mutagen.yml created in $project_root"
 }
 
-update() {
-  latest_release=$(curl --silent "https://api.github.com/repos/nicoschi/mutagen-for-docksal/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+init_project() {
+  local new_project=$1
 
-  if [ "$latest_release" != "$VERSION" ]; then
-    echo -e "${yellow}New release found ($latest_release):
-Do you want to proceed with the update:${NC} [y/n] "
-    read -rp "" proceed
-    if [ "$proceed" == y ] || [ "$proceed" == Y ] ; then
-      echo -e "${yellow}Overriding mutagen command in ~/.docksal/commands/${NC}"
-      curl "https://raw.githubusercontent.com/nicoschi/mutagen-for-docksal/$latest_release/mutagen" > ~/.docksal/commands/mutagen
-      echo -e "
-${green}Update done. 'fin mutagen' is now at version $latest_release ${NC}"
-    else
-      echo 'Aborting'
-      return
-    fi
-  else
-    echo -e "${green}Latest release ($VERSION) is already installed${NC}"
-  fi
+  [[ "$new_project" == true ]] && fin config generate
+
+  set_fin_variable "MUTAGEN" 1
+  set_fin_variable "PROJECT_ROOT" "$(get_fin_variable "PROJECT_ROOT")"
+  set_fin_variable "PROJECT_NAME" "$(get_fin_variable "PROJECT_NAME")"
+  set_fin_variable "DOCKSAL_VOLUMES" "none"
+
+  create_mutagen_config
+
+  [[ "$new_project" == false ]] && { fin rm; fin up; }
 }
 
-version() {
-  echo -e "$VERSION"
+start_project() {
+  if ! fin config env > /dev/null 2>&1; then
+    init_project true
+    mutagen project start
+    return
+  fi
+
+  if [[ -z $(get_fin_variable "MUTAGEN") ]]; then
+    echo -e "${red}WARNING${NC}: A Docksal project already exists."
+    read -rp "Reset project containers (may cause data loss)? [y/N] " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] || { echo "Aborting"; return; }
+    init_project false
+  fi
+
+  mutagen project start
+}
+
+stop_project() {
+  local remove_cli=$1
+  local project_root=$(get_fin_variable "PROJECT_ROOT" | tr -d '"')
+
+  cd "$project_root" || { echo "Cannot stop"; exit 1; }
+
+  mutagen project terminate
+  [[ "$remove_cli" != "-nr" ]] && fin rm cli
+  fin stop
+}
+
+restart_project() {
+  stop_project "$1"
+  start_project
+}
+
+update_script() {
+  local latest_release=$(curl -s https://api.github.com/repos/nicoschi/mutagen-for-docksal/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+  
+  if [[ "$latest_release" == "$VERSION" ]]; then
+    echo -e "${green}You already have the latest version ($VERSION).${NC}"
+    return
+  fi
+
+  echo -e "${yellow}New release found ($latest_release). Update? [y/N] ${NC}"
+  read -rp "" confirm
+  [[ "$confirm" =~ ^[yY]$ ]] || { echo "Update aborted."; return; }
+
+  curl -s "https://raw.githubusercontent.com/nicoschi/mutagen-for-docksal/$latest_release/mutagen" -o ~/.docksal/commands/mutagen
+  echo -e "${green}Updated to version $latest_release.${NC}"
 }
 
 usage() {
-  echo '
+  cat <<EOF
 Usage: fin mutagen [command]
 
 Commands:
-start | up          Start / initialize and start / convert and start a Docksal project alongside with a Mutagen project
-stop [options]      Stop Docksal project and terminate Mutagen project (if already existing)
-  -nr               Do not remove cli container (automatically recreated on start)
-restart [options]   Restart Docksal project and Mutagen project (if already existing)
-  -nr               Do not remove cli container (automatically recreated on start)
-version             Print "fin mutagen" version
-update              Check for updates and update to a new release if exists and you want'
+  start | up         Start or initialize a project with Mutagen
+  stop [-nr]         Stop project; use -nr to keep cli container
+  restart [-nr]      Restart project; use -nr to keep cli container
+  update             Check for updates and update if available
+  version            Show version information
+EOF
 }
 
-get_fin_variable() {
-  variable=$(fin config get --env=local "$1" 2> /dev/null)
-
-  if [ -z "$variable" ]; then
-    fin config get "$1" 2> /dev/null
-  else
-    echo "$variable"
-  fi
-}
-
-set_fin_variable() {
-  fin config set --env=local "$1"="$2"
-}
-
-check_options() {
-  if [[ -z $(get_fin_variable "MUTAGEN") ]] && { [ "$1" == 'stop' ] || [ "$1" == 'restart' ]; }; then
-      usage
-      exit 1
-  fi
-
-  if [[ "$1" == 'start' || "$1" == 'up' ]] && [ "$2" ]; then
-    usage
-    exit 1
-  fi
-
-  if [ "$2" ] && [ "$2" != '-nr' ]; then
-    usage
-    exit 1
-  fi
-}
-
+# Main script logic
 case $1 in
-  "start"|"up")
-    check_options "$@"
-    start "$1"
-    ;;
-  "stop")
-    check_options "$@"
-    stop "$2"
-    ;;
-  "restart")
-    check_options "$@"
-    restart "$2"
-    ;;
-  "update")
-    update
-    ;;
-  "version")
-    version
-    ;;
-  *)
-    usage
-    ;;
+  start|up) start_project ;;
+  stop) stop_project "$2" ;;
+  restart) restart_project "$2" ;;
+  update) update_script ;;
+  version) echo "$VERSION" ;;
+  *) usage ;;
 esac
